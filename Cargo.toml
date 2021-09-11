@@ -1,0 +1,11 @@
+[package]
+name = "function-run"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+home = "0.5"
+libcnb = { git = "https://github.com/Malax/libcnb.rs", branch = "deserialize-launch" }
+toml = "0.5"
