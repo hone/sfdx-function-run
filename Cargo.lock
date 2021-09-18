@@ -37,8 +37,8 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libcnb"
-version = "0.2.0"
-source = "git+https://github.com/Malax/libcnb.rs?branch=deserialize-launch#021a8d348378b8d54ca5665fa9d973f4e4d38fed"
+version = "0.3.0"
+source = "git+https://github.com/hone/libcnb.rs?branch=libcnb-sys#695a09edfee01334a9b668fd3d4540ca403e7f14"
 dependencies = [
  "lazy_static",
  "regex",

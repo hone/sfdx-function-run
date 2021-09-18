@@ -7,5 +7,5 @@ edition = "2018"
 
 [dependencies]
 home = "0.5"
-libcnb = { git = "https://github.com/Malax/libcnb.rs", branch = "deserialize-launch" }
+libcnb = { git = "https://github.com/hone/libcnb.rs", branch = "libcnb-sys" }
 toml = "0.5"

@@ -1,3 +1,4 @@
+use libcnb::data::launch::ProcessType;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -98,4 +99,17 @@ fn main() {
     let launch_toml = layers_dir.join("launch.toml");
     let launch: libcnb::data::launch::Launch =
         toml::from_str(&fs::read_to_string(&launch_toml).unwrap()).unwrap();
+
+    if let Some(process) = launch
+        .processes
+        .iter()
+        .find(|process| process.r#type == "web".parse::<ProcessType>().unwrap())
+    {
+        process::Command::new(&process.command)
+            .args(&process.args)
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+    }
 }
