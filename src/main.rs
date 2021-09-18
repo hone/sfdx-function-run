@@ -105,11 +105,13 @@ fn main() {
         .iter()
         .find(|process| process.r#type == "web".parse::<ProcessType>().unwrap())
     {
-        process::Command::new(&process.command)
+        let mut child = process::Command::new(&process.command)
             .args(&process.args)
-            .stdin(process::Stdio::null())
+            .stdin(process::Stdio::inherit())
             .stdout(process::Stdio::inherit())
             .spawn()
             .unwrap();
+
+        child.wait().unwrap();
     }
 }
