@@ -1,3 +1,5 @@
+use dkregistry::{render, v2::Client};
+use futures::future::try_join_all;
 use libcnb::data::launch::ProcessType;
 use std::{
     fs,
@@ -6,6 +8,46 @@ use std::{
 };
 
 const DEFAULT_STACK_ID: &str = "io.buildpacks.stacks.bionic";
+
+async fn download_image(image: &str, reference: &str, path: impl AsRef<Path>) -> PathBuf {
+    let host = "public.ecr.aws";
+    let login_scope = format!("repository:{}:pull", image);
+    let scopes = vec![login_scope.as_str()];
+    let client = Client::configure()
+        .insecure_registry(false)
+        .registry(host)
+        .username(None)
+        .password(None)
+        .build()
+        .unwrap()
+        .authenticate(scopes.as_slice())
+        .await
+        .unwrap();
+
+    println!("Fetching manifest for {}", image);
+
+    let manifest = client.get_manifest(image, reference).await.unwrap();
+    let layers_digests = manifest.layers_digests(None).unwrap();
+
+    println!("{} -> got {} layer(s)", &image, layers_digests.len());
+
+    let blob_futures = layers_digests
+        .iter()
+        .map(|layer_digest| client.get_blob(&image, &layer_digest))
+        .collect::<Vec<_>>();
+
+    let blobs = try_join_all(blob_futures).await.unwrap();
+
+    println!("Downloaded {} layers", blobs.len());
+
+    std::fs::create_dir(&path).unwrap();
+    let can_path = path.as_ref().canonicalize().unwrap();
+
+    println!("Unpacking layers to {:?}", &can_path);
+    render::unpack(&blobs, &can_path).unwrap();
+
+    can_path
+}
 
 /// Find the default config dir
 fn default_config_dir() -> Option<PathBuf> {
@@ -45,14 +87,8 @@ fn build(
         .output()
 }
 
-fn main() {
-    let buildpack_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("heroku_jvm-function-invoker")
-        .join("cnb")
-        .join("buildpacks")
-        .join("heroku_jvm-function-invoker")
-        .join("0.5.2");
-
+#[tokio::main]
+async fn main() {
     let config_dir = match default_config_dir() {
         Some(config_dir) => config_dir,
         None => {
@@ -69,8 +105,9 @@ fn main() {
     let tmp_dir = config_dir.join("tmp");
     let plan = config_dir.join("plan.toml");
     let build_plan = config_dir.join("build_plan.toml");
+    let buildpacks_dir = config_dir.join("buildpacks");
 
-    for dir in [&platform_dir, &layers_dir, &tmp_dir] {
+    for dir in [&platform_dir, &layers_dir, &tmp_dir, &buildpacks_dir] {
         fs::create_dir_all(dir).unwrap();
     }
     for file in [&plan, &build_plan] {
@@ -81,6 +118,17 @@ fn main() {
             .open(file)
             .unwrap();
     }
+
+    let buildpack_dir = download_image(
+        "heroku-buildpacks/heroku-jvm-function-invoker-buildpack",
+        "sha256:a358b25816d03ce210f7aaf068ea0dae34053421b8e857cd5da2809745626c55",
+        buildpacks_dir.join("heroku-jvm-function-invoker-buildpack"),
+    )
+    .await
+    .join("cnb")
+    .join("buildpacks")
+    .join("heroku_jvm-function-invoker")
+    .join("0.5.2");
 
     // TODO need to resolve dependencies still
     if !detect(&buildpack_dir, &home_dir, &platform_dir, &plan) {
