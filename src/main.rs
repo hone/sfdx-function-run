@@ -1,4 +1,5 @@
 use dkregistry::{render, v2::Client};
+use function_run::buildpack::Buildpack;
 use futures::future::try_join_all;
 use libcnb::data::launch::ProcessType;
 use std::{
@@ -9,8 +10,7 @@ use std::{
 
 const DEFAULT_STACK_ID: &str = "io.buildpacks.stacks.bionic";
 
-async fn download_image(image: &str, reference: &str, path: impl AsRef<Path>) -> PathBuf {
-    let host = "public.ecr.aws";
+async fn download_image(host: &str, image: &str, reference: &str, path: impl AsRef<Path>) {
     let login_scope = format!("repository:{}:pull", image);
     let scopes = vec![login_scope.as_str()];
     let client = Client::configure()
@@ -33,7 +33,7 @@ async fn download_image(image: &str, reference: &str, path: impl AsRef<Path>) ->
 
     let blob_futures = layers_digests
         .iter()
-        .map(|layer_digest| client.get_blob(&image, &layer_digest))
+        .map(|layer_digest| client.get_blob(image, layer_digest))
         .collect::<Vec<_>>();
 
     let blobs = try_join_all(blob_futures).await.unwrap();
@@ -45,8 +45,6 @@ async fn download_image(image: &str, reference: &str, path: impl AsRef<Path>) ->
 
     println!("Unpacking layers to {:?}", &can_path);
     render::unpack(&blobs, &can_path).unwrap();
-
-    can_path
 }
 
 /// Find the default config dir
@@ -87,6 +85,42 @@ fn build(
         .output()
 }
 
+async fn setup_buildpack_dir(buildpack: &Buildpack, buildpacks_dir: impl AsRef<Path>) -> PathBuf {
+    let entries = buildpack.fetch().await.unwrap();
+    let entry = match entries
+        .iter()
+        .find(|entry| entry.version == semver::Version::new(0, 5, 2))
+    {
+        Some(version) => version,
+        None => {
+            eprintln!("No valid version");
+            std::process::exit(1);
+        }
+    };
+
+    let mut split = entry.address.split('@');
+    let mut split2 = split.next().unwrap().splitn(2, '/');
+    let host = split2.next().unwrap();
+    let image = split2.next().unwrap();
+    let reference = split.next().unwrap();
+    let buildpack_download_dir = buildpacks_dir
+        .as_ref()
+        .join(format!("{}-{}", buildpack, entry.version));
+    let buildpack_dir = buildpack_download_dir
+        .join("cnb")
+        .join("buildpacks")
+        .join(buildpack.to_string())
+        .join(entry.version.to_string());
+
+    if buildpack_download_dir.exists() {
+        println!("Using existing {}-{}", buildpack, entry.version);
+    } else {
+        download_image(host, image, reference, buildpack_download_dir).await;
+    }
+
+    buildpack_dir
+}
+
 #[tokio::main]
 async fn main() {
     let config_dir = match default_config_dir() {
@@ -119,16 +153,8 @@ async fn main() {
             .unwrap();
     }
 
-    let buildpack_dir = download_image(
-        "heroku-buildpacks/heroku-jvm-function-invoker-buildpack",
-        "sha256:a358b25816d03ce210f7aaf068ea0dae34053421b8e857cd5da2809745626c55",
-        buildpacks_dir.join("heroku-jvm-function-invoker-buildpack"),
-    )
-    .await
-    .join("cnb")
-    .join("buildpacks")
-    .join("heroku_jvm-function-invoker")
-    .join("0.5.2");
+    let buildpack = Buildpack::new("heroku", "jvm-function-invoker");
+    let buildpack_dir = setup_buildpack_dir(&buildpack, &buildpacks_dir).await;
 
     // TODO need to resolve dependencies still
     if !detect(&buildpack_dir, &home_dir, &platform_dir, &plan) {
