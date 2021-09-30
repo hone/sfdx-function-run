@@ -1,5 +1,4 @@
-use dkregistry::{render, v2::Client};
-use function_run::buildpack::Buildpack;
+use function_run::buildpack::{self, Buildpack};
 use futures::future::try_join_all;
 use libcnb::data::launch::ProcessType;
 use std::{
@@ -9,43 +8,6 @@ use std::{
 };
 
 const DEFAULT_STACK_ID: &str = "io.buildpacks.stacks.bionic";
-
-async fn download_image(host: &str, image: &str, reference: &str, path: impl AsRef<Path>) {
-    let login_scope = format!("repository:{}:pull", image);
-    let scopes = vec![login_scope.as_str()];
-    let client = Client::configure()
-        .insecure_registry(false)
-        .registry(host)
-        .username(None)
-        .password(None)
-        .build()
-        .unwrap()
-        .authenticate(scopes.as_slice())
-        .await
-        .unwrap();
-
-    println!("Fetching manifest for {}", image);
-
-    let manifest = client.get_manifest(image, reference).await.unwrap();
-    let layers_digests = manifest.layers_digests(None).unwrap();
-
-    println!("{} -> got {} layer(s)", &image, layers_digests.len());
-
-    let blob_futures = layers_digests
-        .iter()
-        .map(|layer_digest| client.get_blob(image, layer_digest))
-        .collect::<Vec<_>>();
-
-    let blobs = try_join_all(blob_futures).await.unwrap();
-
-    println!("Downloaded {} layers", blobs.len());
-
-    std::fs::create_dir(&path).unwrap();
-    let can_path = path.as_ref().canonicalize().unwrap();
-
-    println!("Unpacking layers to {:?}", &can_path);
-    render::unpack(&blobs, &can_path).unwrap();
-}
 
 /// Find the default config dir
 fn default_config_dir() -> Option<PathBuf> {
@@ -86,7 +48,7 @@ fn build(
 }
 
 async fn setup_buildpack_dir(buildpack: &Buildpack, buildpacks_dir: impl AsRef<Path>) -> PathBuf {
-    let entries = buildpack.fetch().await.unwrap();
+    let entries = buildpack.registry_entries().await.unwrap();
     let entry = match entries
         .iter()
         .find(|entry| entry.version == semver::Version::new(0, 5, 2))
@@ -98,11 +60,6 @@ async fn setup_buildpack_dir(buildpack: &Buildpack, buildpacks_dir: impl AsRef<P
         }
     };
 
-    let mut split = entry.address.split('@');
-    let mut split2 = split.next().unwrap().splitn(2, '/');
-    let host = split2.next().unwrap();
-    let image = split2.next().unwrap();
-    let reference = split.next().unwrap();
     let buildpack_download_dir = buildpacks_dir
         .as_ref()
         .join(format!("{}-{}", buildpack, entry.version));
@@ -115,7 +72,13 @@ async fn setup_buildpack_dir(buildpack: &Buildpack, buildpacks_dir: impl AsRef<P
     if buildpack_download_dir.exists() {
         println!("Using existing {}-{}", buildpack, entry.version);
     } else {
-        download_image(host, image, reference, buildpack_download_dir).await;
+        buildpack::download(
+            &entries,
+            semver::Version::new(0, 5, 2),
+            buildpack_download_dir,
+        )
+        .await
+        .unwrap();
     }
 
     buildpack_dir

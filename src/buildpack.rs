@@ -1,6 +1,8 @@
+use dkregistry::{render, v2::Client};
+use futures::future::try_join_all;
 use semver::Version;
 use serde::Deserialize;
-use std::fmt;
+use std::{fmt, path::Path};
 use thiserror::Error;
 
 const REGISTRY_INDEX_HOST: &str = "https://raw.githubusercontent.com";
@@ -11,7 +13,7 @@ const REGISTRY_INDEX_PATH: &str = "buildpacks/registry-index/main";
 /// The schema can be found
 /// [here](https://github.com/buildpacks/spec/blob/extensions/buildpack-registry/0.1/extensions/buildpack-registry.md).
 #[derive(Deserialize)]
-pub struct RegistryEntry {
+pub struct BuildpackRegistryEntry {
     #[serde(rename = "ns")]
     pub namespace: String,
     pub name: String,
@@ -22,7 +24,27 @@ pub struct RegistryEntry {
 }
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum DownloadError {
+    #[error("No version found: {0}")]
+    NoVersionFound(semver::Version),
+    #[error("Address is formatted improperly: {0}")]
+    InvalidAddress(String),
+    #[error("Docker Registry error: {0}")]
+    DockerRegistry(#[from] DockerRegistryError),
+}
+
+#[derive(Error, Debug)]
+pub enum DockerRegistryError {
+    #[error("Docker Registry error: {0}")]
+    DockerRegistry(#[from] dkregistry::errors::Error),
+    #[error("Render error: {0}")]
+    Render(#[from] dkregistry::render::RenderError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Error, Debug)]
+pub enum BuildpackRegistryError {
     #[error("http request error")]
     Reqwest(#[from] reqwest::Error),
     #[error("error formatting json")]
@@ -57,7 +79,9 @@ impl Buildpack {
     }
 
     /// Fetch Registry Entries from the Buildpack Registry Index.
-    pub async fn fetch(&self) -> Result<Vec<RegistryEntry>, Error> {
+    pub async fn registry_entries(
+        &self,
+    ) -> Result<Vec<BuildpackRegistryEntry>, BuildpackRegistryError> {
         let url = format!(
             "{}/{}/{}",
             self.host,
@@ -88,6 +112,77 @@ impl Buildpack {
             format!("{}/{}/{}", &self.name[0..=1], &self.name[2..=3], self)
         }
     }
+}
+
+pub async fn download(
+    entries: &Vec<BuildpackRegistryEntry>,
+    version: semver::Version,
+    path: impl AsRef<Path>,
+) -> Result<bool, DownloadError> {
+    let entry = entries
+        .iter()
+        .find(|entry| entry.version == version)
+        .ok_or_else(|| DownloadError::NoVersionFound(version))?;
+
+    let mut split = entry.address.split('@');
+    let mut split2 = split
+        .next()
+        .ok_or_else(|| DownloadError::InvalidAddress(entry.address.clone()))?
+        .splitn(2, '/');
+    let host = split2
+        .next()
+        .ok_or_else(|| DownloadError::InvalidAddress(entry.address.clone()))?;
+    let image = split2
+        .next()
+        .ok_or_else(|| DownloadError::InvalidAddress(entry.address.clone()))?;
+    let reference = split
+        .next()
+        .ok_or_else(|| DownloadError::InvalidAddress(entry.address.clone()))?;
+    download_image(host, image, reference, path).await?;
+
+    Ok(true)
+}
+
+async fn download_image(
+    host: &str,
+    image: &str,
+    reference: &str,
+    path: impl AsRef<Path>,
+) -> Result<(), DockerRegistryError> {
+    let login_scope = format!("repository:{}:pull", image);
+    let scopes = vec![login_scope.as_str()];
+    let client = Client::configure()
+        .insecure_registry(false)
+        .registry(host)
+        .username(None)
+        .password(None)
+        .build()?
+        .authenticate(scopes.as_slice())
+        .await?;
+
+    println!("Fetching manifest for {}", image);
+
+    let manifest = client.get_manifest(image, reference).await?;
+    let layers_digests = manifest.layers_digests(None)?;
+
+    println!("{} -> got {} layer(s)", &image, layers_digests.len());
+
+    let blob_futures = layers_digests
+        .iter()
+        .map(|layer_digest| client.get_blob(image, layer_digest))
+        .collect::<Vec<_>>();
+
+    let blobs = try_join_all(blob_futures).await?;
+
+    println!("Downloaded {} layers", blobs.len());
+
+    std::fs::create_dir(&path)?;
+    let can_path = path.as_ref().canonicalize()?;
+
+    println!("Unpacking layers to {:?}", &can_path);
+    render::unpack(&blobs, &can_path)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -141,7 +236,7 @@ mod tests {
         let mut buildpack = Buildpack::new("heroku", "jvm-function-invoker");
         buildpack.set_host(format!("http://{}", server.address()));
 
-        let entries = buildpack.fetch().await.unwrap();
+        let entries = buildpack.registry_entries().await.unwrap();
 
         assert_eq!(18, entries.len());
         assert_eq!(semver::Version::new(0, 1, 0), entries[0].version);
